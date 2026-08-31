@@ -1,4 +1,5 @@
 import asyncio
+import argparse
 import json
 import os
 
@@ -18,9 +19,9 @@ from src.trace import TraceLogger
 from openai import RateLimitError
 
 
-REPO_URL = "https://github.com/Immrudul/test-repo"
+DEFAULT_REPO_URL = "https://github.com/Immrudul/test-repo"
 
-TASK = """
+DEFAULT_TASK = """
 There is a bug in this repository.
 
 Investigate the repository, reproduce the failure,
@@ -29,7 +30,22 @@ solution by running the appropriate tests.
 """
 
 
-async def main():
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run the Solari debugging agent against a repository task."
+    )
+    parser.add_argument(
+        "--repo",
+        help="Git repository URL. Overrides REPO_URL.",
+    )
+    parser.add_argument(
+        "--task",
+        help="Debugging task for the agent. Overrides TASK.",
+    )
+    return parser.parse_args()
+
+
+async def main(repo_url: str, task: str):
     trace = TraceLogger("traces/agent_run_001.json")
     sandbox = SolariSandbox(trace_logger=trace)
     repo_ready = False
@@ -39,10 +55,16 @@ async def main():
     agent = None
 
     try:
+        demo_fix = os.getenv("DEMO_FIX", "").lower() in {"1", "true", "yes"}
+        if demo_fix and repo_url != DEFAULT_REPO_URL:
+            raise ValueError(
+                "DEMO_FIX is only available for the bundled default repository."
+            )
+
         await sandbox.start()
-        await sandbox.clone_repo(REPO_URL)
+        await sandbox.clone_repo(repo_url)
         repo_ready = True
-        trace.set_metadata(repo_url=REPO_URL)
+        trace.set_metadata(repo_url=repo_url, task=task)
 
         print("Installing repository dependencies...")
         setup_result = await sandbox.run_in_repo(
@@ -64,11 +86,6 @@ async def main():
         trace.record_baseline(initial_test)
 
         executor = ActionExecutor(sandbox)
-        demo_fix = os.getenv("DEMO_FIX", "").lower() in {
-            "1",
-            "true",
-            "yes",
-        }
 
         if demo_fix:
             trace.set_metadata(run_kind="deterministic_demo")
@@ -130,7 +147,8 @@ async def main():
             {
                 "role": "user",
                 "content": (
-                    f"{TASK}\n\nRepository setup is complete.\n\n"
+                    "Repository task:\n"
+                    f"{task}\n\nRepository setup is complete.\n\n"
                     "Initial test result:\n"
                     f"{trim_output(initial_test_output)}\n\n"
                     "Investigate the failure, fix the bug, rerun the tests, "
@@ -229,11 +247,11 @@ async def main():
                                 )
                             else:
                                 blocked_read = (
-                                f"{path} lines {line_start}-{line_end} substantially "
-                                "overlap a recently inspected range "
-                                f"({prior_range}) and its cached output was already returned. Use existing "
-                                "evidence, inspect a different region, run a test, or "
-                                "make a code change."
+                                    f"{path} lines {line_start}-{line_end} substantially "
+                                    "overlap a recently inspected range "
+                                    f"({prior_range}) and its cached output was already returned. Use existing "
+                                    "evidence, inspect a different region, run a test, or "
+                                    "make a code change."
                                 )
 
                     if cached_read_response:
@@ -355,4 +373,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    args = parse_args()
+    repo_url = args.repo or os.getenv("REPO_URL", DEFAULT_REPO_URL)
+    task = args.task or os.getenv("TASK", DEFAULT_TASK)
+    asyncio.run(main(repo_url, task))
