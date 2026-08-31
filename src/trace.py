@@ -16,6 +16,7 @@ class TraceLogger:
             "steps": [],
             "commands": [],
             "final_verification": None,
+            "success": None,
             "termination": None,
         }
 
@@ -57,16 +58,20 @@ class TraceLogger:
         *,
         actor: str = "model",
         purpose: str | None = None,
+        observation: dict | None = None,
+        execution: dict | None = None,
     ):
         step = {
             "step": len(self.run["steps"]) + 1,
             "timestamp": self._timestamp(),
             "actor": actor,
             "action": {"type": tool_name, "args": args},
-            "observation": self._observation(result, error),
+            "observation": observation or self._observation(result, error),
         }
         if purpose:
             step["purpose"] = purpose
+        if execution:
+            step["execution"] = execution
         self.run["steps"].append(step)
 
     def record_final_verification(self, tests, diff, error: str | None = None):
@@ -76,7 +81,9 @@ class TraceLogger:
         self.run["final_verification"] = {
             "tests": self._observation(tests, None),
             "git_diff": self._observation(diff, None),
+            "patch": diff.stdout,
         }
+        self.run["success"] = tests.exitCode == 0
 
     def set_termination(self, reason: str, summary: str | None = None):
         self.run["termination"] = {"reason": reason, "summary": summary}

@@ -237,7 +237,17 @@ async def main():
                         trace.record_tool_step(
                             tool_name,
                             args,
-                            error="Overlapping read served from cache.",
+                            purpose="cached_read",
+                            observation={
+                                "stdout": prior_read["stdout"],
+                                "stderr": "",
+                                "exit_code": 0,
+                                "cached": True,
+                            },
+                            execution={
+                                "actor": "orchestrator",
+                                "kind": "cached_read",
+                            },
                         )
                     elif blocked_read:
                         blocked_reads += 1
@@ -274,7 +284,10 @@ async def main():
                             ):
                                 read_history.pop(args["path"], None)
                                 blocked_reads = 0
-                            elif tool_name == "run_tests":
+                            elif (
+                                tool_name == "run_tests"
+                                and result.exitCode == 0
+                            ):
                                 blocked_reads = 0
 
                             output = result.stdout
