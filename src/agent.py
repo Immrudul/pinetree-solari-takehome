@@ -19,20 +19,17 @@ Important:
   repo_browser, or any undeclared tool.
 - Reproduce failures before fixing them when possible.
 - Inspect evidence before making assumptions.
-- Before running tests, inspect dependency files such as requirements.txt,
-  pyproject.toml, package.json, go.mod, or Cargo.toml and install dependencies
-  when needed.
-- If a dependency file has already been identified, do not search for
-  alternative package manifests unless installation from the known file fails.
+- Repository setup and the initial test result are provided by the
+  orchestrator.
 - Once a failing test has been reproduced, prioritize re-reading the code
   directly related to the failure in a small targeted range. Make a concrete
   hypothesis, modify the relevant code, and rerun the failing test. Avoid
-  repeatedly listing files or searching for dependency manifests at this stage.
+  repeatedly listing files or performing broad searches at this stage.
 - Once you identify a concrete suspicious code block consistent with the
   failing test, stop broad repository exploration. Test the smallest relevant
   code change and rerun the failing test.
-- Use replace_text for a small, targeted edit. It is safer and more efficient
-  than replacing an entire file.
+- Prefer replace_text for a small, targeted edit. Use write_file only to
+  create a file or intentionally replace an entire file.
 - Do not read the same file region more than twice unless a new failure
   specifically requires it.
 - Run tests after changes.

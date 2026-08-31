@@ -4,6 +4,14 @@ import os
 
 from src.actions import ActionExecutor
 from src.agent import DebugAgent, SYSTEM_PROMPT
+from src.orchestration import (
+    build_debugging_state,
+    capture_final_verification,
+    format_result,
+    normalized_read_range,
+    overlapping_read,
+    trim_output,
+)
 from src.sandbox import SolariSandbox
 from src.trace import TraceLogger
 
@@ -19,139 +27,18 @@ solution by running the appropriate tests.
 """
 
 
-def trim_output(output: str, max_chars: int = 2000) -> str:
-    if len(output) <= max_chars:
-        return output
-
-    half = max_chars // 2
-    return (
-        output[:half]
-        + "\n\n... [output truncated] ...\n\n"
-        + output[-half:]
-    )
-
-
-def summarize_output(output: str, max_chars: int = 360) -> str:
-    normalized = " ".join(output.split())
-    if len(normalized) <= max_chars:
-        return normalized
-
-    return normalized[:max_chars] + "..."
-
-
-def build_debugging_state(steps: list[dict]) -> str:
-    files_seen = []
-    read_ranges = []
-    recent_commands = []
-    failures = []
-    source_evidence = []
-
-    for step in steps:
-        action = step["action"]
-        tool_name = action["type"]
-        args = action["args"]
-        observation = step.get("observation") or {}
-
-        if tool_name == "read_file":
-            path = args.get("path", "unknown file")
-            if path not in files_seen:
-                files_seen.append(path)
-
-            start = args.get("line_start")
-            end = args.get("line_end")
-            line_range = f" lines {start}-{end}" if start else ""
-            read_ranges.append(f"{path}{line_range}")
-            if observation.get("exit_code") == 0:
-                excerpt = trim_output(
-                    observation.get("stdout", ""),
-                    max_chars=500,
-                )
-                if excerpt:
-                    source_evidence.append(
-                        f"{path}{line_range}:\n{excerpt}"
-                    )
-        elif tool_name == "search_files":
-            recent_commands.append(
-                f"search {args.get('path') or '.'} for "
-                f"{args.get('query', '')!r}"
-            )
-        elif tool_name == "run_command":
-            command = " ".join(
-                [args.get("command", "")] + args.get("args", [])
-            )
-            exit_code = observation.get("exit_code")
-            recent_commands.append(f"`{command}` (exit {exit_code})")
-
-        if observation.get("error"):
-            failures.append(f"Error: {observation['error']}")
-        elif observation.get("exit_code") not in (None, 0):
-            output = summarize_output(observation.get("stdout", ""))
-            if output:
-                failures.append(f"Failure output: {output}")
-
-    if not files_seen and not recent_commands:
-        return "No repository actions have run yet."
-
-    state_lines = []
-    if files_seen:
-        state_lines.append("Files inspected: " + ", ".join(files_seen))
-    if read_ranges:
-        state_lines.append("Recent file reads: " + ", ".join(read_ranges[-4:]))
-    if recent_commands:
-        state_lines.append("Recent commands: " + "; ".join(recent_commands[-4:]))
-    if failures:
-        state_lines.append("Recent failures: " + " | ".join(failures[-2:]))
-    if source_evidence:
-        state_lines.append(
-            "Recent source evidence:\n" + "\n---\n".join(source_evidence[-3:])
-        )
-
-    state = "\n".join(f"- {line}" for line in state_lines)
-    return trim_output(state, max_chars=1800)
-
-
-def normalized_read_range(args: dict) -> tuple[int, int]:
-    line_start = args.get("line_start") or 1
-    line_end = args.get("line_end") or line_start + 99
-    line_end = max(line_start, line_end)
-
-    if line_end - line_start > 199:
-        line_end = line_start + 199
-
-    return line_start, line_end
-
-
-def overlapping_read(
-    read_history: dict[str, list[dict]],
-    path: str,
-    line_start: int,
-    line_end: int,
-) -> dict | None:
-    for prior_read in read_history.get(path, []):
-        prior_start = prior_read["line_start"]
-        prior_end = prior_read["line_end"]
-        overlap = max(
-            0,
-            min(line_end, prior_end) - max(line_start, prior_start) + 1,
-        )
-        shorter_range = min(
-            line_end - line_start + 1,
-            prior_end - prior_start + 1,
-        )
-
-        if overlap / shorter_range >= 0.75:
-            return prior_read
-
-    return None
-
-
 async def main():
     trace = TraceLogger("traces/agent_run_001.json")
     sandbox = SolariSandbox(trace_logger=trace)
+    repo_ready = False
+    termination_reason = "runtime_error"
+    termination_summary = None
 
     try:
         await sandbox.start()
         await sandbox.clone_repo(REPO_URL)
+        repo_ready = True
+        trace.set_metadata(repo_url=REPO_URL)
 
         print("Installing repository dependencies...")
         setup_result = await sandbox.run_in_repo(
@@ -169,10 +56,8 @@ async def main():
             "python3",
             ["-m", "pytest", "-q"],
         )
-        initial_test_output = initial_test.stdout
-        if initial_test.stderr:
-            initial_test_output += "\nSTDERR:\n" + initial_test.stderr
-        initial_test_output += f"\nExit code: {initial_test.exitCode}"
+        initial_test_output = format_result(initial_test)
+        trace.record_baseline(initial_test)
 
         executor = ActionExecutor(sandbox)
         demo_fix = os.getenv("DEMO_FIX", "").lower() in {
@@ -182,6 +67,7 @@ async def main():
         }
 
         if demo_fix:
+            trace.set_metadata(run_kind="deterministic_demo")
             print("Running orchestrator demo fix...")
             demo_args = {
                 "path": "solve.py",
@@ -196,9 +82,11 @@ async def main():
             }
             demo_result = await executor.execute("replace_text", demo_args)
             trace.record_tool_step(
-                "orchestrator_demo_replace_text",
+                "replace_text",
                 demo_args,
                 result=demo_result,
+                actor="orchestrator",
+                purpose="deterministic_demo",
             )
             if demo_result.exitCode != 0:
                 raise RuntimeError(
@@ -208,9 +96,11 @@ async def main():
 
             verification = await executor.execute("run_tests", {})
             trace.record_tool_step(
-                "orchestrator_demo_run_tests",
+                "run_tests",
                 {},
                 result=verification,
+                actor="orchestrator",
+                purpose="deterministic_demo",
             )
             if verification.exitCode != 0:
                 raise RuntimeError(
@@ -219,9 +109,18 @@ async def main():
                 )
 
             print("Demo fix verified: all tests pass.")
+            termination_reason = "demo_completed"
+            termination_summary = "Deterministic demo fix verified."
             return
 
         agent = DebugAgent()
+        trace.set_metadata(
+            run_kind="model_agent",
+            provider=agent.provider,
+            model=agent.model,
+            agent_mode=agent.mode,
+            max_steps=int(os.getenv("MAX_STEPS", "35")),
+        )
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {
@@ -292,6 +191,8 @@ async def main():
                         trace.record_tool_step(tool_name, args)
                         print("\nAgent finished.")
                         print("Summary:", args["summary"])
+                        termination_reason = "agent_finished"
+                        termination_summary = args["summary"]
                         finished = True
                         break
 
@@ -404,8 +305,21 @@ async def main():
 
         else:
             print(f"Stopped after {max_steps} steps.")
+            termination_reason = "max_steps_reached"
+            termination_summary = f"Stopped after {max_steps} model steps."
 
+    except Exception as error:
+        termination_reason = "runtime_error"
+        termination_summary = str(error)
+        raise
     finally:
+        if repo_ready:
+            try:
+                final_tests, final_diff = await capture_final_verification(sandbox)
+                trace.record_final_verification(final_tests, final_diff)
+            except Exception as error:
+                trace.record_final_verification(None, None, error=str(error))
+        trace.set_termination(termination_reason, termination_summary)
         trace.save()
         await sandbox.stop()
 

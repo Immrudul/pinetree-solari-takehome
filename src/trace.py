@@ -2,14 +2,25 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.models import AgentAction
-
 
 class TraceLogger:
+    """Writes one self-contained, evaluation-friendly record per agent run."""
+
     def __init__(self, output_path: str = "traces/run.json"):
         self.output_path = Path(output_path)
-        self.events = []
-        self.steps = []
+        self.run = {
+            "schema_version": "1.0",
+            "started_at": self._timestamp(),
+            "metadata": {},
+            "baseline": None,
+            "steps": [],
+            "commands": [],
+            "final_verification": None,
+            "termination": None,
+        }
+
+    def set_metadata(self, **metadata):
+        self.run["metadata"].update(metadata)
 
     def record_command(
         self,
@@ -20,36 +31,22 @@ class TraceLogger:
         stderr: str,
         exit_code: int,
     ):
-        self.events.append(
+        self.run["commands"].append(
             {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "type": "command",
+                "timestamp": self._timestamp(),
                 "command": command,
                 "args": args,
                 "cwd": cwd,
-                "stdout": stdout,
-                "stderr": stderr,
-                "exit_code": exit_code,
+                "observation": {
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "exit_code": exit_code,
+                },
             }
         )
 
-    def record_step(
-        self,
-        action: AgentAction,
-        result=None,
-        error: str | None = None,
-    ):
-        observation = self._observation(result, error)
-
-        self.steps.append(
-            {
-                "step": len(self.steps) + 1,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "reasoning": action.reasoning,
-                "action": action.model_dump(),
-                "observation": observation,
-            }
-        )
+    def record_baseline(self, result):
+        self.run["baseline"] = {"tests": self._observation(result, None)}
 
     def record_tool_step(
         self,
@@ -57,20 +54,32 @@ class TraceLogger:
         args: dict,
         result=None,
         error: str | None = None,
+        *,
+        actor: str = "model",
+        purpose: str | None = None,
     ):
-        observation = self._observation(result, error)
+        step = {
+            "step": len(self.run["steps"]) + 1,
+            "timestamp": self._timestamp(),
+            "actor": actor,
+            "action": {"type": tool_name, "args": args},
+            "observation": self._observation(result, error),
+        }
+        if purpose:
+            step["purpose"] = purpose
+        self.run["steps"].append(step)
 
-        self.steps.append(
-            {
-                "step": len(self.steps) + 1,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "action": {
-                    "type": tool_name,
-                    "args": args,
-                },
-                "observation": observation,
-            }
-        )
+    def record_final_verification(self, tests, diff, error: str | None = None):
+        if error is not None:
+            self.run["final_verification"] = {"error": error}
+            return
+        self.run["final_verification"] = {
+            "tests": self._observation(tests, None),
+            "git_diff": self._observation(diff, None),
+        }
+
+    def set_termination(self, reason: str, summary: str | None = None):
+        self.run["termination"] = {"reason": reason, "summary": summary}
 
     @staticmethod
     def _observation(result, error: str | None):
@@ -84,18 +93,15 @@ class TraceLogger:
             return {"error": error}
         return None
 
+    @staticmethod
+    def _timestamp() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
     def save(self):
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
-
+        self.run["completed_at"] = self._timestamp()
         with self.output_path.open("w", encoding="utf-8") as file:
-            json.dump(
-                {
-                    "steps": self.steps,
-                    "events": self.events,
-                },
-                file,
-                indent=2,
-            )
+            json.dump(self.run, file, indent=2)
 
-    def get_steps(self):
-        return self.steps
+    def get_steps(self) -> list[dict]:
+        return self.run["steps"]
