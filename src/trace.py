@@ -16,6 +16,7 @@ class TraceLogger:
             "steps": [],
             "commands": [],
             "final_verification": None,
+            "evaluation": None,
             "success": None,
             "termination": None,
         }
@@ -85,8 +86,20 @@ class TraceLogger:
         }
         self.run["success"] = tests.exitCode == 0
 
-    def set_termination(self, reason: str, summary: str | None = None):
-        self.run["termination"] = {"reason": reason, "summary": summary}
+    def set_termination(
+        self,
+        reason: str,
+        summary: str | None = None,
+        **details,
+    ):
+        self.run["termination"] = {
+            "reason": reason,
+            "summary": summary,
+            **{key: value for key, value in details.items() if value is not None},
+        }
+
+    def record_evaluation(self, evaluation: dict):
+        self.run["evaluation"] = evaluation
 
     @staticmethod
     def _observation(result, error: str | None):

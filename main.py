@@ -4,6 +4,7 @@ import os
 
 from src.actions import ActionExecutor
 from src.agent import DebugAgent, SYSTEM_PROMPT
+from src.evaluator import TraceEvaluator
 from src.orchestration import (
     build_debugging_state,
     capture_final_verification,
@@ -14,6 +15,7 @@ from src.orchestration import (
 )
 from src.sandbox import SolariSandbox
 from src.trace import TraceLogger
+from openai import RateLimitError
 
 
 REPO_URL = "https://github.com/Immrudul/test-repo"
@@ -33,6 +35,8 @@ async def main():
     repo_ready = False
     termination_reason = "runtime_error"
     termination_summary = None
+    termination_details = {}
+    agent = None
 
     try:
         await sandbox.start()
@@ -321,6 +325,14 @@ async def main():
             termination_reason = "max_steps_reached"
             termination_summary = f"Stopped after {max_steps} model steps."
 
+    except RateLimitError:
+        termination_reason = "provider_rate_limit"
+        termination_summary = "The model provider rate limit was reached."
+        termination_details = {
+            "provider": agent.provider if agent else None,
+            "retryable": True,
+        }
+        raise
     except Exception as error:
         termination_reason = "runtime_error"
         termination_summary = str(error)
@@ -332,7 +344,12 @@ async def main():
                 trace.record_final_verification(final_tests, final_diff)
             except Exception as error:
                 trace.record_final_verification(None, None, error=str(error))
-        trace.set_termination(termination_reason, termination_summary)
+        trace.set_termination(
+            termination_reason,
+            termination_summary,
+            **termination_details,
+        )
+        trace.record_evaluation(TraceEvaluator().evaluate(trace.run))
         trace.save()
         await sandbox.stop()
 
