@@ -58,6 +58,10 @@ def build_debugging_state(steps: list[dict]) -> str:
             recent_commands.append(
                 f"`{command}` (exit {observation.get('exit_code')})"
             )
+        elif tool_name == "run_tests":
+            recent_commands.append(f"pytest (exit {observation.get('exit_code')})")
+        elif tool_name == "replace_text":
+            recent_commands.append(f"edited {args.get('path', 'unknown file')}")
 
         if observation.get("error"):
             failures.append(f"Error: {observation['error']}")
