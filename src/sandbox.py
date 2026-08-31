@@ -31,6 +31,16 @@ class SolariSandbox:
 
         print("Sandbox created and connected.")
 
+    async def start_from_snapshot(self, snapshot_id: str):
+        print(f"Restoring Solari sandbox from snapshot {snapshot_id}...")
+        self.sandbox = await self.client.create(
+            template="base",
+            from_snapshot=snapshot_id,
+        )
+        await self.sandbox.connect()
+        self.repo_dir = "/workspace/repo"
+        print("Sandbox restored and connected.")
+
     async def run(
         self,
         command: str,

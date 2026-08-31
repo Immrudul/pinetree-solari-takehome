@@ -1,27 +1,15 @@
-import asyncio
 import argparse
-import json
+import asyncio
 import os
+from datetime import datetime, timezone
+from pathlib import Path
 
-from src.actions import ActionExecutor
-from src.agent import DebugAgent, SYSTEM_PROMPT
-from src.evaluator import TraceEvaluator
-from src.orchestration import (
-    build_debugging_state,
-    capture_final_verification,
-    format_result,
-    normalized_read_range,
-    overlapping_read,
-    print_run_summary,
-    trim_output,
-)
+from src.attempt import run_agent_attempt
+from src.experiment import print_experiment_summary, save_experiment
 from src.sandbox import SolariSandbox
-from src.trace import TraceLogger
-from openai import RateLimitError
 
 
 DEFAULT_REPO_URL = "https://github.com/Immrudul/test-repo"
-
 DEFAULT_TASK = """
 There is a bug in this repository.
 
@@ -35,358 +23,154 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Run the Solari debugging agent against a repository task."
     )
+    parser.add_argument("--repo", help="Git repository URL. Overrides REPO_URL.")
+    parser.add_argument("--task", help="Debugging task. Overrides TASK.")
     parser.add_argument(
-        "--repo",
-        help="Git repository URL. Overrides REPO_URL.",
+        "--attempts",
+        type=int,
+        help="Independent attempts from one prepared snapshot. Overrides NUM_ATTEMPTS.",
     )
     parser.add_argument(
-        "--task",
-        help="Debugging task for the agent. Overrides TASK.",
+        "--trace-path",
+        help="Trace file for a single attempt. Overrides TRACE_PATH.",
+    )
+    parser.add_argument(
+        "--experiment-id",
+        help="Name for a multi-attempt experiment output directory.",
     )
     return parser.parse_args()
 
 
-async def main(repo_url: str, task: str):
-    trace = TraceLogger("traces/agent_run_001.json")
-    sandbox = SolariSandbox(trace_logger=trace)
-    repo_ready = False
-    termination_reason = "runtime_error"
-    termination_summary = None
-    termination_details = {}
-    agent = None
+async def prepare_benchmark(sandbox: SolariSandbox, repo_url: str):
+    await sandbox.start()
+    await sandbox.clone_repo(repo_url)
 
+    print("Installing repository dependencies...")
+    setup = await sandbox.run_in_repo("pip3", ["install", "-r", "requirements.txt"])
+    if setup.exitCode != 0:
+        raise RuntimeError(f"Failed to install dependencies:\n{setup.stderr}")
+
+    print("Running the initial test suite...")
+    baseline = await sandbox.run_in_repo("python3", ["-m", "pytest", "-q"])
+    if baseline.exitCode == 0:
+        raise RuntimeError(
+            "Benchmark does not reproduce a failing baseline; refusing to run attempts."
+        )
+    return baseline
+
+
+async def run_single_attempt(
+    sandbox: SolariSandbox,
+    *,
+    repo_url: str,
+    task: str,
+    baseline,
+    trace_path: str,
+    demo_fix: bool,
+):
+    return await run_agent_attempt(
+        sandbox,
+        repo_url=repo_url,
+        task=task,
+        baseline_result=baseline,
+        trace_path=trace_path,
+        demo_fix=demo_fix,
+    )
+
+
+async def run_fork_experiment(
+    base: SolariSandbox,
+    *,
+    repo_url: str,
+    task: str,
+    baseline,
+    attempts: int,
+    experiment_id: str,
+):
+    snapshot_id = await base.sandbox.snapshot("buggy-ready")
+    print(f"Created shared buggy snapshot: {snapshot_id}")
+    await base.stop()  # Frees the concurrency slot before restoring children.
+
+    output_dir = Path("traces") / experiment_id
+    results = []
+    for attempt_number in range(1, attempts + 1):
+        trace_path = output_dir / f"attempt_{attempt_number}.json"
+        child = SolariSandbox()
+        try:
+            await child.start_from_snapshot(snapshot_id)
+            trace = await run_agent_attempt(
+                child,
+                repo_url=repo_url,
+                task=task,
+                baseline_result=baseline,
+                trace_path=str(trace_path),
+                attempt_number=attempt_number,
+                snapshot_id=snapshot_id,
+            )
+            results.append(
+                {
+                    "attempt": attempt_number,
+                    "trace_path": str(trace_path),
+                    "trace": trace,
+                }
+            )
+        finally:
+            await child.stop()
+
+    comparison_path = output_dir / "comparison.json"
+    experiment = save_experiment(
+        str(comparison_path),
+        experiment_id=experiment_id,
+        repo_url=repo_url,
+        task=task,
+        snapshot_id=snapshot_id,
+        attempts=results,
+    )
+    print_experiment_summary(experiment, str(comparison_path))
+
+
+async def main(repo_url: str, task: str, attempts: int, trace_path: str, experiment_id: str):
+    if attempts < 1:
+        raise ValueError("--attempts must be at least 1.")
+
+    demo_fix = os.getenv("DEMO_FIX", "").lower() in {"1", "true", "yes"}
+    if demo_fix and repo_url != DEFAULT_REPO_URL:
+        raise ValueError("DEMO_FIX is only available for the bundled default repository.")
+    if demo_fix and attempts != 1:
+        raise ValueError("DEMO_FIX cannot be used with multiple attempts.")
+
+    base = SolariSandbox()
     try:
-        demo_fix = os.getenv("DEMO_FIX", "").lower() in {"1", "true", "yes"}
-        if demo_fix and repo_url != DEFAULT_REPO_URL:
-            raise ValueError(
-                "DEMO_FIX is only available for the bundled default repository."
+        baseline = await prepare_benchmark(base, repo_url)
+        if attempts == 1:
+            await run_single_attempt(
+                base,
+                repo_url=repo_url,
+                task=task,
+                baseline=baseline,
+                trace_path=trace_path,
+                demo_fix=demo_fix,
             )
-
-        await sandbox.start()
-        await sandbox.clone_repo(repo_url)
-        repo_ready = True
-        trace.set_metadata(repo_url=repo_url, task=task)
-
-        print("Installing repository dependencies...")
-        setup_result = await sandbox.run_in_repo(
-            "pip3",
-            ["install", "-r", "requirements.txt"],
-        )
-        if setup_result.exitCode != 0:
-            raise RuntimeError(
-                "Failed to install repository dependencies:\n"
-                f"{setup_result.stderr}"
-            )
-
-        print("Running the initial test suite...")
-        initial_test = await sandbox.run_in_repo(
-            "python3",
-            ["-m", "pytest", "-q"],
-        )
-        initial_test_output = format_result(initial_test)
-        trace.record_baseline(initial_test)
-
-        executor = ActionExecutor(sandbox)
-
-        if demo_fix:
-            trace.set_metadata(run_kind="deterministic_demo")
-            print("Running orchestrator demo fix...")
-            demo_args = {
-                "path": "solve.py",
-                "old_text": (
-                    '            solved.append("G")\n'
-                    '            solved.append("O")'
-                ),
-                "new_text": (
-                    '            solved.append("L")\n'
-                    '            solved.append("F")'
-                ),
-            }
-            demo_result = await executor.execute("replace_text", demo_args)
-            trace.record_tool_step(
-                "replace_text",
-                demo_args,
-                result=demo_result,
-                actor="orchestrator",
-                purpose="deterministic_demo",
-            )
-            if demo_result.exitCode != 0:
-                raise RuntimeError(
-                    "Demo replacement failed:\n"
-                    f"{demo_result.stderr}"
-                )
-
-            verification = await executor.execute("run_tests", {})
-            trace.record_tool_step(
-                "run_tests",
-                {},
-                result=verification,
-                actor="orchestrator",
-                purpose="deterministic_demo",
-            )
-            if verification.exitCode != 0:
-                raise RuntimeError(
-                    "Demo verification failed:\n"
-                    f"{verification.stdout}\n{verification.stderr}"
-                )
-
-            print("Demo fix verified: all tests pass.")
-            termination_reason = "demo_completed"
-            termination_summary = "Deterministic demo fix verified."
-            return
-
-        agent = DebugAgent()
-        trace.set_metadata(
-            run_kind="model_agent",
-            provider=agent.provider,
-            model=agent.model,
-            agent_mode=agent.mode,
-            max_steps=int(os.getenv("MAX_STEPS", "35")),
-        )
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    "Repository task:\n"
-                    f"{task}\n\nRepository setup is complete.\n\n"
-                    "Initial test result:\n"
-                    f"{trim_output(initial_test_output)}\n\n"
-                    "Investigate the failure, fix the bug, rerun the tests, "
-                    "and finish when verified."
-                ),
-            },
-        ]
-        max_steps = int(os.getenv("MAX_STEPS", "35"))
-        read_history: dict[str, list[dict]] = {}
-        cached_read_requests: dict[tuple[str, int, int], int] = {}
-        blocked_reads = 0
-
-        print(
-            f"Agent mode: {agent.mode} "
-            f"(completion cap: {agent.max_completion_tokens})"
-        )
-
-        for step_num in range(max_steps):
-            print(f"\n{'=' * 60}\nSTEP {step_num + 1}\n{'=' * 60}")
-
-            debugging_state = build_debugging_state(trace.get_steps())
-            force_progress = blocked_reads >= 2
-            if force_progress:
-                debugging_state += (
-                    "\n- Progress mode is active after repeated redundant reads. "
-                    "Repository inspection is temporarily unavailable. "
-                    "If you have a concrete hypothesis, use replace_text to make the smallest "
-                    "targeted edit, then use run_tests. Only use finish after tests pass."
-                )
-
-            response_message = agent.get_next_response(
-                messages,
-                debugging_state=debugging_state,
-                force_progress=force_progress,
-            )
-            messages.append(response_message)
-
-            tool_calls = response_message.tool_calls
-            if not tool_calls:
-                print("Model response:", response_message.content)
-                continue
-
-            finished = False
-
-            for tool_call in tool_calls:
-                tool_name = tool_call.function.name
-
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError as error:
-                    output = f"ERROR: Invalid tool arguments: {error}"
-                    trace.record_tool_step(
-                        tool_name,
-                        {},
-                        error=output,
-                    )
-                else:
-                    intent = args.pop("intent", None)
-                    print("Tool:", tool_name)
-                    print("Args:", args)
-                    if intent:
-                        print("Intent:", intent)
-
-                    if tool_name == "finish":
-                        trace.record_tool_step(tool_name, args, intent=intent)
-                        print("\nAgent finished.")
-                        print("Summary:", args["summary"])
-                        termination_reason = "agent_finished"
-                        termination_summary = args["summary"]
-                        finished = True
-                        break
-
-                    cached_read_response = None
-                    blocked_read = None
-                    if tool_name == "read_file" and agent.mode == "production":
-                        path = args["path"]
-                        line_start, line_end = normalized_read_range(args)
-                        prior_read = overlapping_read(
-                            read_history,
-                            path,
-                            line_start,
-                            line_end,
-                        )
-                        if prior_read:
-                            request_key = (path, line_start, line_end)
-                            cached_count = cached_read_requests.get(request_key, 0)
-                            prior_range = (
-                                f"{prior_read['line_start']}-{prior_read['line_end']}"
-                            )
-                            if cached_count == 0:
-                                cached_read_requests[request_key] = 1
-                                cached_read_response = (
-                                    f"NOTE: {path} lines {line_start}-{line_end} substantially "
-                                    "overlap a recently inspected range "
-                                    f"({prior_range}). Returning the cached source evidence "
-                                    "instead of rerunning the same read.\n\n"
-                                    "CACHED SOURCE OUTPUT:\n"
-                                    f"{trim_output(prior_read['stdout'], max_chars=1200)}"
-                                )
-                            else:
-                                blocked_read = (
-                                    f"{path} lines {line_start}-{line_end} substantially "
-                                    "overlap a recently inspected range "
-                                    f"({prior_range}) and its cached output was already returned. Use existing "
-                                    "evidence, inspect a different region, run a test, or "
-                                    "make a code change."
-                                )
-
-                    if cached_read_response:
-                        output = cached_read_response
-                        trace.record_tool_step(
-                            tool_name,
-                            args,
-                            purpose="cached_read",
-                            intent=intent,
-                            observation={
-                                "stdout": prior_read["stdout"],
-                                "stderr": "",
-                                "exit_code": 0,
-                                "cached": True,
-                            },
-                            execution={
-                                "actor": "orchestrator",
-                                "kind": "cached_read",
-                            },
-                        )
-                    elif blocked_read:
-                        blocked_reads += 1
-                        if blocked_reads >= 2:
-                            blocked_read += (
-                                " You have attempted multiple redundant reads. "
-                                "Form a hypothesis and either edit the relevant "
-                                "code or run the tests."
-                            )
-                        output = f"ERROR: {blocked_read}"
-                        trace.record_tool_step(
-                            tool_name,
-                            args,
-                            error=blocked_read,
-                            intent=intent,
-                        )
-                    else:
-                        try:
-                            result = await executor.execute(tool_name, args)
-                            trace.record_tool_step(
-                                tool_name,
-                                args,
-                                result=result,
-                                intent=intent,
-                            )
-
-                            if tool_name == "read_file" and result.exitCode == 0:
-                                read_history.setdefault(path, []).append(
-                                    {
-                                        "line_start": line_start,
-                                        "line_end": line_end,
-                                        "stdout": result.stdout,
-                                    }
-                                )
-                                blocked_reads = 0
-                                cached_read_requests.clear()
-                            elif (
-                                tool_name in {"write_file", "replace_text"}
-                                and result.exitCode == 0
-                            ):
-                                read_history.pop(args["path"], None)
-                                blocked_reads = 0
-                            elif (
-                                tool_name == "run_tests"
-                                and result.exitCode == 0
-                            ):
-                                blocked_reads = 0
-
-                            output = result.stdout
-                            if result.stderr:
-                                output += "\nSTDERR:\n" + result.stderr
-                            output += f"\nExit code: {result.exitCode}"
-
-                        except Exception as error:
-                            output = f"ERROR: {error}"
-                            trace.record_tool_step(
-                                tool_name,
-                                args,
-                                error=str(error),
-                                intent=intent,
-                            )
-
-                print(output)
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": tool_name,
-                        "content": trim_output(output),
-                    }
-                )
-
-            if finished:
-                break
-
         else:
-            print(f"Stopped after {max_steps} steps.")
-            termination_reason = "max_steps_reached"
-            termination_summary = f"Stopped after {max_steps} model steps."
-
-    except RateLimitError:
-        termination_reason = "provider_rate_limit"
-        termination_summary = "The model provider rate limit was reached."
-        termination_details = {
-            "provider": agent.provider if agent else None,
-            "retryable": True,
-        }
-        raise
-    except Exception as error:
-        termination_reason = "runtime_error"
-        termination_summary = str(error)
-        raise
+            await run_fork_experiment(
+                base,
+                repo_url=repo_url,
+                task=task,
+                baseline=baseline,
+                attempts=attempts,
+                experiment_id=experiment_id,
+            )
+            return
     finally:
-        if repo_ready:
-            try:
-                final_tests, final_diff = await capture_final_verification(sandbox)
-                trace.record_final_verification(final_tests, final_diff)
-            except Exception as error:
-                trace.record_final_verification(None, None, error=str(error))
-        trace.set_termination(
-            termination_reason,
-            termination_summary,
-            **termination_details,
-        )
-        trace.record_evaluation(TraceEvaluator().evaluate(trace.run))
-        trace.save()
-        print_run_summary(trace)
-        await sandbox.stop()
+        await base.stop()
 
 
 if __name__ == "__main__":
     args = parse_args()
     repo_url = args.repo or os.getenv("REPO_URL", DEFAULT_REPO_URL)
     task = args.task or os.getenv("TASK", DEFAULT_TASK)
-    asyncio.run(main(repo_url, task))
+    attempts = args.attempts or int(os.getenv("NUM_ATTEMPTS", "1"))
+    trace_path = args.trace_path or os.getenv("TRACE_PATH", "traces/agent_run_001.json")
+    default_experiment_id = "experiment_" + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    experiment_id = args.experiment_id or os.getenv("EXPERIMENT_ID", default_experiment_id)
+    asyncio.run(main(repo_url, task, attempts, trace_path, experiment_id))
