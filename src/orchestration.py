@@ -117,3 +117,45 @@ async def capture_final_verification(sandbox):
     tests = await sandbox.run_in_repo("python3", ["-m", "pytest", "-q"])
     diff = await sandbox.run_in_repo("git", ["diff", "--"])
     return tests, diff
+
+
+def print_run_summary(trace) -> None:
+    run = trace.run
+    metadata = run.get("metadata") or {}
+    termination = run.get("termination") or {}
+    evaluation = run.get("evaluation") or {}
+    execution = evaluation.get("execution") or {}
+    agent_quality = evaluation.get("agent_quality") or {}
+
+    reason = termination.get("reason", "unknown")
+    if run.get("success") is True:
+        status = "PASS"
+    elif reason in {"provider_rate_limit", "runtime_error", "max_steps_reached"}:
+        status = "INCOMPLETE"
+    else:
+        status = "FAIL"
+
+    def test_status(exit_code):
+        if exit_code is None:
+            return "not available"
+        return ("PASS" if exit_code == 0 else "FAIL") + f" (exit {exit_code})"
+
+    score = agent_quality.get("overall")
+    score_display = f"{score:.1f} / 10" if isinstance(score, (int, float)) else "not scored"
+
+    print(
+        f"\n{'=' * 60}\n"
+        "RUN SUMMARY\n"
+        f"{'=' * 60}\n"
+        f"Status: {status}\n"
+        f"Repository: {metadata.get('repo_url', 'unknown')}\n"
+        f"Model: {metadata.get('provider', 'orchestrator')} / "
+        f"{metadata.get('model', metadata.get('run_kind', 'unknown'))}\n"
+        f"Termination: {reason}\n"
+        f"Steps: {len(run.get('steps', []))}\n"
+        f"Baseline tests: {test_status(execution.get('baseline_exit_code'))}\n"
+        f"Final tests: {test_status(execution.get('final_test_exit_code'))}\n"
+        f"Patch captured: {'yes' if execution.get('patch_captured') else 'no'}\n"
+        f"Agent trajectory score: {score_display}\n"
+        f"Trace: {trace.output_path}"
+    )

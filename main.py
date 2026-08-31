@@ -12,6 +12,7 @@ from src.orchestration import (
     format_result,
     normalized_read_range,
     overlapping_read,
+    print_run_summary,
     trim_output,
 )
 from src.sandbox import SolariSandbox
@@ -380,6 +381,7 @@ async def main(repo_url: str, task: str):
         )
         trace.record_evaluation(TraceEvaluator().evaluate(trace.run))
         trace.save()
+        print_run_summary(trace)
         await sandbox.stop()
 
 
