@@ -50,6 +50,12 @@ class TraceEvaluator:
             step for step in model_steps if (step.get("observation") or {}).get("cached")
         ]
         duplicate_action_count = self._duplicate_investigations(model_steps)
+        intent_steps = [
+            step
+            for step in model_steps
+            if isinstance(step.get("intent"), str) and step["intent"].strip()
+        ]
+        intent_coverage = len(intent_steps) / len(model_steps) if model_steps else 0
         tests_before_first_edit = (
             sum(1 for step in model_tests if step["step"] < first_model_edit_step)
             if first_model_edit_step is not None
@@ -85,6 +91,8 @@ class TraceEvaluator:
             cached_model_reads=cached_model_reads,
             duplicate_action_count=duplicate_action_count,
             tests_before_first_edit=tests_before_first_edit,
+            intent_coverage=intent_coverage,
+            intent_step_count=len(intent_steps),
         )
 
         return {
@@ -113,6 +121,8 @@ class TraceEvaluator:
         cached_model_reads: list[dict],
         duplicate_action_count: int,
         tests_before_first_edit: int | None,
+        intent_coverage: float,
+        intent_step_count: int,
     ) -> dict:
         if run_kind == "deterministic_demo" or not model_steps:
             reason = (
@@ -174,13 +184,11 @@ class TraceEvaluator:
                     bool(model_tests_after_edit),
                 ),
             ),
-            "clarity": {
-                "score": None,
-                "reason": (
-                    "Not scored: the trace does not yet record concise "
-                    "per-action intents."
-                ),
-            },
+            "clarity": self._score(
+                round(intent_coverage * 10),
+                f"{intent_step_count}/{len(model_steps)} model actions include a concise intent. "
+                "This measures intent coverage, not semantic quality.",
+            ),
             "efficiency": self._score(
                 efficiency,
                 self._efficiency_reason(
@@ -231,6 +239,8 @@ class TraceEvaluator:
                 "cached_model_read_count": len(cached_model_reads),
                 "duplicate_investigation_count": duplicate_action_count,
                 "tests_before_first_model_edit": tests_before_first_edit,
+                "intent_step_count": intent_step_count,
+                "intent_coverage": round(intent_coverage, 3),
             },
             "scores": scores,
             "overall": round(sum(numeric_scores) / len(numeric_scores), 1),

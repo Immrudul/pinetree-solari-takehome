@@ -206,11 +206,14 @@ async def main(repo_url: str, task: str):
                         error=output,
                     )
                 else:
+                    intent = args.pop("intent", None)
                     print("Tool:", tool_name)
                     print("Args:", args)
+                    if intent:
+                        print("Intent:", intent)
 
                     if tool_name == "finish":
-                        trace.record_tool_step(tool_name, args)
+                        trace.record_tool_step(tool_name, args, intent=intent)
                         print("\nAgent finished.")
                         print("Summary:", args["summary"])
                         termination_reason = "agent_finished"
@@ -260,6 +263,7 @@ async def main(repo_url: str, task: str):
                             tool_name,
                             args,
                             purpose="cached_read",
+                            intent=intent,
                             observation={
                                 "stdout": prior_read["stdout"],
                                 "stderr": "",
@@ -284,11 +288,17 @@ async def main(repo_url: str, task: str):
                             tool_name,
                             args,
                             error=blocked_read,
+                            intent=intent,
                         )
                     else:
                         try:
                             result = await executor.execute(tool_name, args)
-                            trace.record_tool_step(tool_name, args, result=result)
+                            trace.record_tool_step(
+                                tool_name,
+                                args,
+                                result=result,
+                                intent=intent,
+                            )
 
                             if tool_name == "read_file" and result.exitCode == 0:
                                 read_history.setdefault(path, []).append(
@@ -323,6 +333,7 @@ async def main(repo_url: str, task: str):
                                 tool_name,
                                 args,
                                 error=str(error),
+                                intent=intent,
                             )
 
                 print(output)

@@ -30,6 +30,9 @@ Important:
   code change and rerun the failing test.
 - Prefer replace_text for a small, targeted edit. Use write_file only to
   create a file or intentionally replace an entire file.
+- Every tool call must include an intent: one short, action-specific sentence
+  stating its immediate purpose. Do not provide hidden reasoning, step-by-step
+  analysis, or a long explanation.
 - Do not read the same file region more than twice unless a new failure
   specifically requires it.
 - Run tests after changes.
@@ -51,8 +54,13 @@ TOOLS = [
                         "type": "array",
                         "items": {"type": "string"},
                     },
+                    "intent": {
+                        "type": "string",
+                        "description": "One short sentence explaining this action's immediate purpose.",
+                        "maxLength": 160,
+                    },
                 },
-                "required": ["command", "args"],
+                "required": ["command", "args", "intent"],
                 "additionalProperties": False,
             },
         },
@@ -80,8 +88,13 @@ TOOLS = [
                         "type": "integer",
                         "minimum": 1,
                     },
+                    "intent": {
+                        "type": "string",
+                        "description": "One short sentence explaining this action's immediate purpose.",
+                        "maxLength": 160,
+                    },
                 },
-                "required": ["path"],
+                "required": ["path", "intent"],
                 "additionalProperties": False,
             },
         },
@@ -99,8 +112,13 @@ TOOLS = [
                 "properties": {
                     "query": {"type": "string"},
                     "path": {"type": "string"},
+                    "intent": {
+                        "type": "string",
+                        "description": "One short sentence explaining this action's immediate purpose.",
+                        "maxLength": 160,
+                    },
                 },
-                "required": ["query", "path"],
+                "required": ["query", "path", "intent"],
                 "additionalProperties": False,
             },
         },
@@ -115,8 +133,13 @@ TOOLS = [
                 "properties": {
                     "path": {"type": "string"},
                     "content": {"type": "string"},
+                    "intent": {
+                        "type": "string",
+                        "description": "One short sentence explaining this action's immediate purpose.",
+                        "maxLength": 160,
+                    },
                 },
-                "required": ["path", "content"],
+                "required": ["path", "content", "intent"],
                 "additionalProperties": False,
             },
         },
@@ -138,8 +161,13 @@ TOOLS = [
                     "path": {"type": "string"},
                     "old_text": {"type": "string"},
                     "new_text": {"type": "string"},
+                    "intent": {
+                        "type": "string",
+                        "description": "One short sentence explaining this action's immediate purpose.",
+                        "maxLength": 160,
+                    },
                 },
-                "required": ["path", "old_text", "new_text"],
+                "required": ["path", "old_text", "new_text", "intent"],
                 "additionalProperties": False,
             },
         },
@@ -151,7 +179,14 @@ TOOLS = [
             "description": "Run the repository's Python test suite with pytest.",
             "parameters": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "intent": {
+                        "type": "string",
+                        "description": "One short sentence explaining this action's immediate purpose.",
+                        "maxLength": 160,
+                    },
+                },
+                "required": ["intent"],
                 "additionalProperties": False,
             },
         },
@@ -163,8 +198,15 @@ TOOLS = [
             "description": "Finish the task after the fix has been verified.",
             "parameters": {
                 "type": "object",
-                "properties": {"summary": {"type": "string"}},
-                "required": ["summary"],
+                "properties": {
+                    "summary": {"type": "string"},
+                    "intent": {
+                        "type": "string",
+                        "description": "One short sentence explaining this action's immediate purpose.",
+                        "maxLength": 160,
+                    },
+                },
+                "required": ["summary", "intent"],
                 "additionalProperties": False,
             },
         },

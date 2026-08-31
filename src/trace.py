@@ -59,6 +59,7 @@ class TraceLogger:
         *,
         actor: str = "model",
         purpose: str | None = None,
+        intent: str | None = None,
         observation: dict | None = None,
         execution: dict | None = None,
     ):
@@ -71,6 +72,8 @@ class TraceLogger:
         }
         if purpose:
             step["purpose"] = purpose
+        if actor == "model":
+            step["intent"] = intent
         if execution:
             step["execution"] = execution
         self.run["steps"].append(step)
