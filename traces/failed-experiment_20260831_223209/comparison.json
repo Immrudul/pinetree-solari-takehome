@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "experiment_id": "experiment_20260831_223209",
+  "created_at": "2026-08-31T22:34:48.719563+00:00",
+  "repo_url": "https://github.com/Immrudul/test-repo",
+  "task": "Investigate the failing test, make the smallest justified code change, and verify the fix with pytest.",
+  "snapshot_id": "snap_dl3hi49ssgru",
+  "attempt_count": 3,
+  "attempts": [
+    {
+      "attempt": 1,
+      "trace_path": "traces\\experiment_20260831_223209\\attempt_1.json",
+      "success": false,
+      "overall": 4.4,
+      "steps": 21,
+      "termination": "provider_rate_limit"
+    },
+    {
+      "attempt": 2,
+      "trace_path": "traces\\experiment_20260831_223209\\attempt_2.json",
+      "success": false,
+      "overall": null,
+      "steps": 0,
+      "termination": "provider_rate_limit"
+    },
+    {
+      "attempt": 3,
+      "trace_path": "traces\\experiment_20260831_223209\\attempt_3.json",
+      "success": false,
+      "overall": 4.4,
+      "steps": 18,
+      "termination": "provider_rate_limit"
+    }
+  ],
+  "winner": 1
+}
